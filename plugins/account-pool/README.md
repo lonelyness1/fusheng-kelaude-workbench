@@ -25,6 +25,7 @@
 
 - `call(method, params)`：`list`、`create`、`update`、`settings`、`bind`、`refresh`、`loginCommand`。写入与探测均通过共享锁；返回值只包含插件元数据与脱敏状态。
 - `beforeRun({session,cwd,request})`：宿主已持执行锁时调用，返回 `{accountId,configDir}`。不得在此嵌套获取宿主锁。
+- `readUsage({session,refresh,inProgress})`：读取当前会话对应账号的额度；运行中按实际执行账号读取，空闲时固定账号按下轮偏好读取，自动策略按上轮账号读取。额度栏标注所属账号，原有账号的后台刷新不会覆盖独立账号。
 - `onEvent({session,event})`：接收通用 `quota` 与 `rate_limit` 事件，更新当前账号的额度观测。
 - `onExit()`、`close()`：退出不自动重试，关闭停止监控。
 - `sessionState(id)`、`ownsSession(session)`：读取插件记录的当前账号及会话记录来源。

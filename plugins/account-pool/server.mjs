@@ -155,6 +155,19 @@ class AccountPool {
   sessionState(sessionId) { return structuredClone(this.state.bindings[sessionId] || null); }
   ownsSession(session) { return Boolean(this.state.bindings[session?.id]?.transcriptAccountId !== undefined && this.state.bindings[session.id].transcriptAccountId !== PRIMARY_ACCOUNT_ID); }
 
+  async readUsage({ session, refresh = false, inProgress = false } = {}) {
+    this.#active();
+    const binding = this.state.bindings[session?.id];
+    // A preference saved during a turn is for the next CLI. Its quota must not
+    // replace the current process's quota while that process is still running.
+    const id = (inProgress ? binding?.transcriptAccountId : binding?.pinned ? binding.accountId : binding?.transcriptAccountId) || this.state.defaultAccountId;
+    const monitor = this.#monitor(id);
+    if (refresh) await monitor.refresh({ force: true });
+    else void monitor.refresh().catch(() => {});
+    this.#active();
+    return { ...monitor.read(), contextLabel: this.#record(id).label };
+  }
+
   async executionStatus() {
     this.#active();
     if (!this.isBusy()) {
@@ -306,7 +319,7 @@ class AccountPool {
   onEvent({ session, event } = {}) {
     const binding = this.state.bindings[session?.id];
     if (!binding || this.closed || !this.isActive()) return;
-    if (event?.type === 'quota' || event?.type === 'rate_limit') this.#monitor(binding.accountId).observe?.(event);
+    if (event?.type === 'quota' || event?.type === 'rate_limit') this.#monitor(binding.transcriptAccountId).observe?.(event);
   }
 
   onExit() { /* Routing is persisted before launch; no automatic replay occurs. */ }

@@ -117,6 +117,44 @@ test('bundled server plugins are inactive by default and the original single-acc
   await f.fake.calls[0].finish(); assert.equal(f.wb.store.get(s.id).status, 'idle');
 });
 
+test('session quota stays with its execution profile across primary refreshes and concurrent runs', async t => {
+  const observations = [];
+  const primary = { fiveHour: { utilization: 100 }, sevenDay: { utilization: 100 }, scopes: [], rateLimited: true };
+  const f = await fixture(t, { usageMonitor: {
+    read: () => structuredClone(primary), refresh: async () => structuredClone(primary),
+    observe: event => observations.push(event), close: async () => {},
+  } });
+  await f.login(); await f.enable('account-pool');
+  const extra = await f.account('Second account'), secondary = await f.create(), first = await f.create();
+  await f.backend('account-pool', 'bind', { sessionId: secondary.id, accountId: extra.id });
+  await f.backend('account-pool', 'bind', { sessionId: first.id, accountId: 'primary' });
+  const route = `/api/usage?sessionId=${secondary.id}`;
+  assert.equal((await f.api(route)).body.fiveHour.utilization, 2, 'a selected extra profile must not show primary quota');
+  assert.equal((await f.send(secondary)).status, 202);
+  const call = f.fake.calls[0];
+  call.emit({ type: 'rate_limit', rateLimited: false, windows: { fiveHour: { utilization: 21 }, sevenDay: { utilization: 34 } } });
+  await f.wb.runs.get(secondary.id).pluginEvents;
+  assert.equal(observations.length, 0, 'extra-profile events must never enter the primary monitor');
+  assert.equal((await f.api(route)).body.fiveHour.utilization, 21);
+  assert.equal((await f.api('/api/bootstrap')).body.usage.fiveHour.utilization, 100);
+  assert.equal((await f.api('/api/usage?refresh=1')).body.fiveHour.utilization, 100);
+  assert.equal((await f.api(route)).body.fiveHour.utilization, 21, 'primary refresh cannot overwrite secondary quota');
+  // A cached primary rejection must not be copied into the plugin's routing monitor.
+  assert.equal((await f.send(first)).status, 202);
+  f.fake.calls[1].emit({ type: 'rate_limit', rateLimited: true, limitType: 'five_hour', cooldownUntil: '2099-01-01T00:00:00Z', windows: { fiveHour: { utilization: 100 } } });
+  await f.wb.runs.get(first.id).pluginEvents;
+  assert.equal(observations.length, 1);
+  assert.equal((await f.api(`/api/usage?sessionId=${first.id}`)).body.rateLimited, true);
+  assert.equal((await f.api(route)).body.rateLimited, false);
+  assert.equal(call.stops, 0); assert.equal(call.options.configDir, extra.profile);
+  await call.finish(); await f.fake.calls[1].finish();
+  assert.equal((await f.api(route + '&refresh=1')).body.fiveHour.utilization, 2);
+  await f.enable('account-pool', false);
+  assert.equal((await f.api(route)).status, 409, 'disabled ownership must not silently show another profile');
+  assert.equal((await f.api('/api/usage?sessionId=invalid')).status, 400);
+  assert.equal((await f.api(`/api/usage?sessionId=${randomUUID()}`)).status, 404);
+});
+
 test('an authenticated extra profile makes execution ready without a primary login, and disabling the plugin restores base readiness', async t => {
   const f = await fixture(t, {primaryLoggedIn: false,
     monitor: {sample: async activeRuns => ({activeRuns}), auth: async () => ({loggedIn: false})}});
