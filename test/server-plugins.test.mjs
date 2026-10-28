@@ -117,6 +117,27 @@ test('bundled server plugins are inactive by default and the original single-acc
   await f.fake.calls[0].finish(); assert.equal(f.wb.store.get(s.id).status, 'idle');
 });
 
+test('draft quota follows composer choices without binding a session or starting a model request', async t => {
+  const f = await fixture(t);
+  await f.login(); await f.enable('account-pool');
+  const extra = await f.account('Draft account');
+  const route = choices => '/api/usage?choices=' + encodeURIComponent(JSON.stringify(choices));
+  const snapshot = await f.api(route({ 'account-pool': extra.id }));
+  assert.equal(snapshot.status, 200);
+  assert.equal(snapshot.body.contextLabel, 'Draft account');
+  assert.equal(snapshot.body.fiveHour.utilization, 2);
+  const automatic = await f.api(route({ 'account-pool': 'auto' }));
+  assert.equal(automatic.body.fiveHour.utilization, null, 'the next automatically routed account is not known before launch');
+  assert.equal(automatic.body.contextLabel, '自动选择');
+  assert.deepEqual((await f.backend('account-pool', 'list')).body.bindings, {});
+  assert.equal(f.fake.calls.length, 0);
+  assert.equal((await f.api('/api/usage?choices=broken')).status, 400);
+  assert.equal((await f.api(route({ 'account-pool': [] }))).status, 400);
+  assert.equal((await f.api(route({ 'account-pool': randomUUID() }))).status, 404);
+  await f.backend('account-pool', 'update', { id: extra.id, enabled: false });
+  assert.equal((await f.api(route({ 'account-pool': extra.id }))).status, 409);
+});
+
 test('session quota stays with its execution profile across primary refreshes and concurrent runs', async t => {
   const observations = [];
   const primary = { fiveHour: { utilization: 100 }, sevenDay: { utilization: 100 }, scopes: [], rateLimited: true };
@@ -265,6 +286,30 @@ test('parallel runs use their own account profiles; exclusive plugin operations 
   assert.equal((await f.api(`/api/sessions/${b.id}/file`, { method: 'PUT', body: { path: 'note.txt', text: 'x', hash: null } })).status, 409);
   release(); await holding;
   assert.equal((await f.send(a)).status, 202); assert.equal(f.fake.calls.length, 3); await f.fake.calls[2].finish();
+});
+
+test('composer choices reach only their own plugin, and an idle conversation can be rebound while another runs', async t => {
+  const f = await fixture(t); await f.login(); await f.enable('account-pool');
+  const one = await f.account('Picker one'), two = await f.account('Picker two'), a = await f.create(), b = await f.create();
+  const message = (session, body) => f.api(`/api/sessions/${session.id}/messages`, { method: 'POST', body: { text: '选择器任务', requestId: randomUUID(), ...body } });
+  assert.equal((await f.send(a)).status, 202);
+  assert.equal((await f.backend('account-pool', 'bind', { sessionId: b.id, accountId: two.id })).status, 200, 'other conversations stay rebindable');
+  const refused = await f.backend('account-pool', 'bind', { sessionId: a.id, accountId: one.id });
+  assert.equal(refused.status, 409); assert.match(refused.body.error, /正在运行/);
+  for (const choices of [['account-pool'], { 'account-pool': '../escape' }, { 'Bad Id': 'x' }, 'auto']) {
+    assert.equal((await message(b, { choices })).status, 400, JSON.stringify(choices));
+  }
+  // The first-message choice overrides the stored binding; choices for other plugins are not passed along.
+  assert.equal((await message(b, { choices: { 'account-pool': one.id, 'not-installed': 'x' } })).status, 202);
+  assert.equal(f.fake.calls[1].options.configDir, one.profile);
+  const bindings = (await f.backend('account-pool', 'list')).body.bindings;
+  assert.equal(bindings[b.id].accountId, one.id); assert.equal(bindings[b.id].pinned, true);
+  const c = await f.create();
+  const missing = await message(c, { choices: { 'account-pool': 'not-an-account' } });
+  assert.equal(missing.status, 409); assert.match(missing.body.error, /所选账号/);
+  assert.equal((await message(c, { choices: { 'account-pool': 'auto' } })).status, 202);
+  assert.equal(f.fake.calls[2].options.configDir, undefined, 'automatic selection keeps the default account');
+  for (const call of f.fake.calls) await call.finish();
 });
 
 test('two simultaneous resume requests reserve only one execution slot', async t => {

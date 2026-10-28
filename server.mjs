@@ -13,7 +13,7 @@ import {registerIDE} from './lib/api-ide.mjs';
 import {LiveFeed} from './lib/live.mjs';
 import {ModelCatalog,contextKey,isModel} from './lib/models.mjs';
 import {PluginManager,PluginError} from './lib/plugins.mjs';
-import {ServerPluginHost} from './lib/server-plugins.mjs';
+import {ServerPluginHost,validChoices} from './lib/server-plugins.mjs';
 const root=path.dirname(fileURLToPath(import.meta.url));
 // Shown in the page; release is the directory name under releases/ when deployed from a release tree.
 const version=JSON.parse(await fs.readFile(path.join(root,'package.json'),'utf8')).version,release=path.basename(path.dirname(root))==='releases'?path.basename(root):null;
@@ -78,10 +78,18 @@ export async function createWorkbench(options={}){
  });
  app.get('/api/usage',async(req,res)=>{
   const force=req.query.refresh==='1';
+  let choices=null,session=null;
+  if(req.query.choices!==undefined){
+   if(typeof req.query.choices!=='string'||req.query.choices.length>2048)return send(res,400,'选择器参数无效。');
+   try{choices=JSON.parse(req.query.choices);}catch{return send(res,400,'选择器参数无效。');}
+   if(!validChoices(choices))return send(res,400,'选择器参数无效。');
+  }
   if(req.query.sessionId!==undefined){
    if(typeof req.query.sessionId!=='string'||!/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(req.query.sessionId))return send(res,400,'会话 id 无效。');
-   const session=store.get(req.query.sessionId);if(!session)return send(res,404,'会话不存在。');
-   const snapshot=await serverPlugins.readUsage({session,refresh:force,inProgress:Boolean(runs.has(session.id)||terminals.active?.sessionId===session.id)});
+   session=store.get(req.query.sessionId);if(!session)return send(res,404,'会话不存在。');
+  }
+  if(session||choices){
+   const snapshot=await serverPlugins.readUsage({session,choices,refresh:force,inProgress:Boolean(session&&(runs.has(session.id)||terminals.active?.sessionId===session.id))});
    if(snapshot!==null)return res.json(snapshot);
   }
   await usage.refresh({force}).catch(()=>{});res.json(usage.read());
@@ -164,9 +172,11 @@ export async function createWorkbench(options={}){
   }
  }
  app.post('/api/sessions/:id/messages',async(req,res)=>{
- const s=req.session,text=req.body?.text,requestId=req.body?.requestId;
+ const s=req.session,text=req.body?.text,requestId=req.body?.requestId,choices=req.body?.choices;
  if(typeof text!=='string'||!text.trim()||text.length>30000)return send(res,400,'请输入 1–30000 个字符。');
- const r=await startTurn(s,text,{requestId});
+ // Values picked in plugin composer pickers before this conversation existed; each plugin only sees its own.
+ if(choices!==undefined&&!validChoices(choices))return send(res,400,'输入框选择项无效。');
+ const r=await startTurn(s,text,{requestId,...(choices?{choices}:{})});
  if(r.msg)return send(res,r.code,r.msg);
  res.status(202).json(sessionView(s));
  });

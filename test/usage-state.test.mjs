@@ -28,3 +28,15 @@ test('a failed current quota request clears old limits instead of showing anothe
   await assert.rejects(state.refresh(), /profile disabled/);
   assert.deepEqual(shown.at(-1), { stale: true, unavailableReason: 'profile disabled' });
 });
+
+test('draft choices isolate quota from default pushes and earlier draft responses', async () => {
+  const pending = [], shown = [];
+  const state = createUsageState({ load: (id, force, choices) => new Promise(resolve => pending.push({ id, choices, resolve })), render: value => shown.push(value) });
+  state.select(null, { 'account-pool': 'first' }); const first = state.refresh();
+  state.select(null, { 'account-pool': 'second' }); const second = state.refresh();
+  assert.equal(state.acceptDefault({ fiveHour: 100 }), false);
+  assert.deepEqual(pending[1].choices, { 'account-pool': 'second' });
+  pending[1].resolve({ fiveHour: 20 }); await second;
+  pending[0].resolve({ fiveHour: 100 }); assert.equal(await first, false);
+  assert.deepEqual(shown.at(-1), { fiveHour: 20 });
+});
